@@ -13,6 +13,11 @@
 
 static pthread_mutex_t rebind_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static inline void *get_page_aligned_address(void *address) {
+    uintptr_t page_size = (uintptr_t)sysconf(_SC_PAGESIZE);
+    return (void *)((uintptr_t)address & ~(page_size - 1));
+}
+
 static int rebind_symbol_for_image(const struct mach_header *header, intptr_t slide, struct rebind_entry *entries, size_t count) {
     uintptr_t cur = (uintptr_t)header + sizeof(struct mach_header_64);
     struct segment_command_64 *seg_cmd;
@@ -28,6 +33,11 @@ static int rebind_symbol_for_image(const struct mach_header *header, intptr_t sl
             if (strcmp(sect->sectname, "__nl_symbol_ptr") == 0 || strcmp(sect->sectname, "__got") == 0) {
                 uintptr_t base = (uintptr_t)(sect->addr) + slide;
                 uint64_t *indirect_sym_table = (uint64_t *)base;
+                void *page_start = get_page_aligned_address(indirect_sym_table);
+                size_t page_size = sysconf(_SC_PAGESIZE);
+                size_t size = sect->size + ((uintptr_t)indirect_sym_table - (uintptr_t)page_start);
+
+                mprotect(page_start, size, PROT_READ | PROT_WRITE);
                 for (uint32_t j = 0; j < sect->size / sizeof(void *); j++) {
                     struct nlist_64 *sym = get_symbol_for_index(j);
                     if (sym) {
@@ -36,13 +46,12 @@ static int rebind_symbol_for_image(const struct mach_header *header, intptr_t sl
                                 if (entries[k].replaced) {
                                     *entries[k].replaced = (void *)(uintptr_t)indirect_sym_table[j];
                                 }
-                                mprotect((void *)((uintptr_t)indirect_sym_table + (j * sizeof(void *))), sizeof(void *), PROT_READ | PROT_WRITE);
                                 indirect_sym_table[j] = (uintptr_t)entries[k].replacement;
-                                mprotect((void *)((uintptr_t)indirect_sym_table + (j * sizeof(void *))), sizeof(void *), PROT_READ);
                             }
                         }
                     }
                 }
+                mprotect(page_start, size, PROT_READ);
             }
         }
     }
